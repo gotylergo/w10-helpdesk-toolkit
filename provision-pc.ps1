@@ -1,3 +1,8 @@
+# Windows Update Script params section
+param($global:RestartRequired = 0,
+$global:MoreUpdates = 0,
+$global:MaxCycles = 10)
+
 # Log file location
 $LogFile = ($env:ProgramData + "\pcProv\log.txt")
 # Create provPC folder in ProgramData
@@ -23,6 +28,7 @@ function Set-ScheduledRebootTask {
     $TaskTrigger = (New-ScheduledTaskTrigger -atstartup)
     $TaskAction = New-ScheduledTaskAction -Execute Powershell.exe -argument "-ExecutionPolicy Bypass -File $scriptFullPath"
     $TaskUserID = New-ScheduledTaskPrincipal -UserId System -RunLevel Highest -LogonType ServiceAccount
+    # $TaskUserID = New-ScheduledTaskPrincipal -UserId (Get-CimInstance –ClassName Win32_ComputerSystem | Select-Object -expand UserName) -RunLevel Highest -LogonType ServiceAccount
     Register-ScheduledTask -Force -TaskName pcProv -Action $TaskAction -Principal $TaskUserID -Trigger $TaskTrigger
     if ($?) {
         Write-Output "Scheduled task created. Script will continue after reboot." >> $LogFile
@@ -46,10 +52,19 @@ if (-not (Test-Path 'HKLM:\SOFTWARE\pcProv')) {
         Throw "Couldn't create registry key for script continuity after reboots. Exiting." >> $LogFile
     }
 
-    # Get variables
-    $credential = Get-Credential -Message "Enter your credentials in the form of domain\username"
+    # Get variables, store variables that will be needed after reboot in the registry
+    $credential = Get-Credential -Message "Enter your credentials in the form of domain\username or username@domain.com format"
+    # New-ItemProperty -Path HKLM:\SOFTWARE\pcProv -PropertyType String -Name "credentialUsername" -Value $credential.Username
+    # New-ItemProperty -Path HKLM:\SOFTWARE\pcProv -PropertyType String -Name "credentialPassword" -Value $credential.Password | ConvertFrom-SecureString
     $domainName = Read-Host "Enter the domain to join"
     $newPCName = Read-Host "Enter the new computer name"
+    # Confirm the serial number for the bitlocker folder
+    $defaultValue = (Get-WmiObject win32_bios).SerialNumber
+    $pcSerialNumber = Read-Host "What is the serial number of the end user machine? Leave blank to use this value: [$($defaultValue)]"
+    $pcSerialnumber = ($defaultValue,$prompt)[[bool]$prompt]
+    $userToNotify = Read-Host "Enter the email of the user you want to notify when complete"
+    $mailServer = Read-Host "What mail server should we use to send the completion message?"
+    New-ItemProperty -Path HKLM:\SOFTWARE\pcProv -PropertyType String -Name "userToNotify" -Value $userToNotify -Force
     # Get admin passwords until they match
     do {
         $pwd1 = Read-Host "Enter the local administrator account password" -AsSecureString
@@ -112,18 +127,8 @@ if (-not (Test-Path 'HKLM:\SOFTWARE\pcProv')) {
     Write-Output "Encrypting system drive..." >> $LogFile
     Start-Process 'manage-bde.exe' -ArgumentList " -protectors -add $env:SystemDrive -recoverypassword" -Verb runas -Wait
     Start-Process 'manage-bde.exe' -ArgumentList " -on -usedspaceonly $env:SystemDrive -em aes256 " -Verb runas -Wait
-    #Backing Password file to the server
-    $pcSerialNumber = (Get-WmiObject win32_bios).SerialNumber
-#     New-PSDrive -Name "z" -PSProvider "Filesystem" -Root "" -Credential $credential
     if ($?) {
-        New-Item -Path "z:\" -Name "$env:computername $pcSerialnumber" -ItemType "directory"
-        (Get-BitLockerVolume -MountPoint C).KeyProtector.recoverypassword -match '\S\' > "z:\$env:computername $pcSerialnumber\Bitlocker Recovery Key.txt"
-        if ($?) {
-            Write-Output "Bitlocker key successfully saved." >> $LogFile
-        }
-        else {
-            Write-Error "Saving Bitlocker key failed. Try manually." >> $LogFile
-        }
+      Write-Output "Encryption successful."
     }
     else {
         Write-Error "Encryption failed, try manually."
@@ -141,7 +146,7 @@ if (-not (Test-Path 'HKLM:\SOFTWARE\pcProv')) {
     Set-ScheduledRebootTask
 
     # Join to domain and restart
-    Add-Computer -DomainName $domainName -Server HQ-corpdc01 -NewName $newPCName -Credential $credential -Restart -Force
+    Add-Computer -DomainName $domainName -NewName $newPCName -Credential $credential -Restart -Force
 }
 # Part 2: If script has run, check reg key to determine where to continue
 else {
@@ -150,7 +155,7 @@ else {
     if ($regStatus -eq 1) {
         Write-Output "Registry key value is: 1. Continuing from Part 2.1" >> $LogFile
 
-        # still working on this
+        #DO STUFF
 
         # Increment the registry value to resume where we left off after reboot
         Set-ItemProperty -Path HKLM:\SOFTWARE\pcProv -Name "Status" -Value 2
@@ -160,47 +165,207 @@ else {
         Restart-Computer -Force
 
     }
-    # Script Part 2.2
     elseif ($regStatus -eq 2) {
         Write-Output "Registry key value is: 2. Continuing from Part 2.2" >> $LogFile
 
-        # Still working on this
-        # Install Windows Updates
-        Install-PackageProvider -Name -NuGet -Force
-        Install-Module PSWindowsUpdate -Force -Confirm:$false
-        Add-WUServiceManager -ServiceID 7971f918-a847-4430-9279-4a52d1efe18d -Confirm:$false
-        do {
-            Get-WUInstall -MicrosoftUpdate -AcceptAll -AutoReboot
+        Write-Output "Running Windows Update Script" >> $LogFile
+        # Credit to joefitzgerald on Github https://gist.github.com/joefitzgerald/8203265
+
+        function Check-ContinueRestartOrEnd() {
+            $RegistryKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+            $RegistryEntry = "InstallWindowsUpdates"
+            switch ($global:RestartRequired) {
+                0 {			
+                    $prop = (Get-ItemProperty $RegistryKey).$RegistryEntry
+                    if ($prop) {
+                        Write-Host "Restart Registry Entry Exists - Removing It" >> $Logfile
+                        Remove-ItemProperty -Path $RegistryKey -Name $RegistryEntry -ErrorAction SilentlyContinue
+                    }
+            
+                    Write-Host "No Restart Required" >> $Logfile
+                    Check-WindowsUpdates
+            
+                    if (($global:MoreUpdates -eq 1) -and ($script:Cycles -le $global:MaxCycles)) {
+                        Stop-Service $script:ServiceName -Force
+                        Set-Service -Name $script:ServiceName -StartupType Disabled -Status Stopped 
+                        Install-WindowsUpdates
+                    }
+                    elseif ($script:Cycles -gt $global:MaxCycles) {
+                        Write-Host "Exceeded Cycle Count - Stopping" >> $Logfile
+                    }
+                    else {
+                        Write-Host "Done Installing Windows Updates" >> $Logfile
+                    }
+                }
+                1 {
+                    $prop = (Get-ItemProperty $RegistryKey).$RegistryEntry
+                    if (-not $prop) {
+                        Write-Host "Restart Registry Entry Does Not Exist - Creating It" >> $Logfile
+                        Set-ItemProperty -Path $RegistryKey -Name $RegistryEntry -Value "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -File $($script:ScriptPath)"
+                    }
+                    else {
+                        Write-Host "Restart Registry Entry Exists Already" >> $Logfile
+                    }
+            
+                    Write-Host "Restart Required - Restarting..." >> $Logfile
+                    Restart-Computer
+                }
+                default { 
+                    Write-Host "Unsure If A Restart Is Required"  >> $Logfile
+                    break
+                }
+            }
         }
-        while ((Get-WUList) -ne 0)
-        if ((Get-WUList) -eq 0) {
-            Write-Output "Windows Updates installed." >> $LogFile
+
+        function Install-WindowsUpdates() {
+            $script:Cycles++
+            Write-Host 'Evaluating Available Updates:' >> $Logfile
+            $UpdatesToDownload = New-Object -ComObject 'Microsoft.Update.UpdateColl'
+            foreach ($Update in $SearchResult.Updates) {
+                if (($Update -ne $null) -and (!$Update.IsDownloaded)) {
+                    [bool]$addThisUpdate = $false
+                    if ($Update.InstallationBehavior.CanRequestUserInput) {
+                        Write-Host "> Skipping: $($Update.Title) because it requires user input" >> $Logfile
+                    }
+                    else {
+                        if (!($Update.EulaAccepted)) {
+                            Write-Host "> Note: $($Update.Title) has a license agreement that must be accepted. Accepting the license." >> $Logfile
+                            $Update.AcceptEula()
+                            [bool]$addThisUpdate = $true
+                        }
+                        else {
+                            [bool]$addThisUpdate = $true
+                        }
+                    }
+        
+                    if ([bool]$addThisUpdate) {
+                        Write-Host "Adding: $($Update.Title)" >> $Logfile
+                        $UpdatesToDownload.Add($Update) | Out-Null
+                    }
+                }
+            }
+    
+            if ($UpdatesToDownload.Count -eq 0) {
+                Write-Host "No Updates To Download..." >> $Logfile
+            }
+            else {
+                Write-Host 'Downloading Updates...' >> $Logfile
+                $Downloader = $UpdateSession.CreateUpdateDownloader()
+                $Downloader.Updates = $UpdatesToDownload
+                $Downloader.Download()
+            }
+	
+            $UpdatesToInstall = New-Object -ComObject 'Microsoft.Update.UpdateColl'
+            [bool]$rebootMayBeRequired = $false
+            Write-Host 'The following updates are downloaded and ready to be installed:' >> $Logfile
+            foreach ($Update in $SearchResult.Updates) {
+                if (($Update.IsDownloaded)) {
+                    Write-Host "> $($Update.Title)" >> $Logfile
+                    $UpdatesToInstall.Add($Update) | Out-Null
+              
+                    if ($Update.InstallationBehavior.RebootBehavior -gt 0) {
+                        [bool]$rebootMayBeRequired = $true
+                    }
+                }
+            }
+    
+            if ($UpdatesToInstall.Count -eq 0) {
+                Write-Host 'No updates available to install...' >> $Logfile
+                $global:MoreUpdates = 0
+                $global:RestartRequired = 0
+                break
+            }
+
+            if ($rebootMayBeRequired) {
+                Write-Host 'These updates may require a reboot' >> $Logfile
+                $global:RestartRequired = 1
+            }
+	
+            Write-Host 'Installing updates...' >> $Logfile
+  
+            $Installer = $script:UpdateSession.CreateUpdateInstaller()
+            $Installer.Updates = $UpdatesToInstall
+            $InstallationResult = $Installer.Install()
+  
+            Write-Host "Installation Result: $($InstallationResult.ResultCode)" >> $Logfile
+            Write-Host "Reboot Required: $($InstallationResult.RebootRequired)" >> $Logfile
+            Write-Host 'Listing of updates installed and individual installation results:' >> $Logfile
+            if ($InstallationResult.RebootRequired) {
+                $global:RestartRequired = 1
+            }
+            else {
+                $global:RestartRequired = 0
+            }
+    
+            for ($i = 0; $i -lt $UpdatesToInstall.Count; $i++) {
+                New-Object -TypeName PSObject -Property @{
+                    Title  = $UpdatesToInstall.Item($i).Title
+                    Result = $InstallationResult.GetUpdateResult($i).ResultCode
+                }
+            }
+	
+            Check-ContinueRestartOrEnd
+        }
+
+        function Check-WindowsUpdates() {
+            Write-Host "Checking For Windows Updates" >> $Logfile
+            $Username = $env:USERDOMAIN + "\" + $env:USERNAME
+ 
+            New-EventLog -Source $ScriptName -LogName 'Windows Powershell' -ErrorAction SilentlyContinue
+ 
+            $Message = "Script: " + $ScriptPath + "`nScript User: " + $Username + "`nStarted: " + (Get-Date).toString()
+
+            Write-EventLog -LogName 'Windows Powershell' -Source $ScriptName -EventID "104" -EntryType "Information" -Message $Message
+            Write-Host $Message >> $Logfile
+
+            $script:UpdateSearcher = $script:UpdateSession.CreateUpdateSearcher()
+            $script:SearchResult = $script:UpdateSearcher.Search("IsInstalled=0 and Type='Software' and IsHidden=0")      
+            if ($SearchResult.Updates.Count -ne 0) {
+                $script:SearchResult.Updates | Select-Object -Property Title, Description, SupportUrl, UninstallationNotes, RebootRequired, EulaAccepted | Format-List
+                $global:MoreUpdates = 1
+            }
+            else {
+                Write-Host 'There are no applicable updates' >> $Logfile
+                $global:RestartRequired = 0
+                $global:MoreUpdates = 0
+            }
+        }
+
+        $script:ScriptName = $MyInvocation.MyCommand.ToString()
+        $script:ScriptPath = $MyInvocation.MyCommand.Path
+        $script:UpdateSession = New-Object -ComObject 'Microsoft.Update.Session'
+        $script:UpdateSession.ClientApplicationID = 'Packer Windows Update Installer'
+        $script:UpdateSearcher = $script:UpdateSession.CreateUpdateSearcher()
+        $script:SearchResult = New-Object -ComObject 'Microsoft.Update.UpdateColl'
+        $script:Cycles = 0
+
+        Check-WindowsUpdates
+        if ($global:MoreUpdates -eq 1) {
+            Install-WindowsUpdates
         }
         else {
-            Write-Error "Windows Updates not complete. Try manually." >> $LogFile
+            Check-ContinueRestartOrEnd
         }
+
+        Set-ItemProperty -Path HKLM:\SOFTWARE\pcProv -Name "Status" -Value 3
+        if ($?) {
+            Write-Output "Registry key changed to value: 3." >> $LogFile
+        }
+        Restart-Computer -Force
+
+    }
+    # Script Part 2.3
+    elseif ($regStatus -eq 3) {
+        Write-Output "Registry key value is: 3. Continuing from Part 2.3" >> $LogFile
 
         Write-Output "Provisioning complete." >> $LogFile
 
-        # Play complete tones
-        function b($a, $b) {
-            [console]::beep($a, $b)
+        $userToNotify = Get-ItemPropertyValue HKLM:\SOFTWARE\pcProv -Name "userToNotify"
+        # MSG * /SERVER:$pcToNotify "$Env:Computername provisioning is done!"
+        Send-MailMessage -From $userToNotify -To $userToNotify -Subject 'provPC Complete' -Body "See the attached log for details." -Attachments $LogFile -Priority High -DeliveryNotificationOption OnSuccess, OnFailure -SmtpServer $mailServer
+        if ($?) {
+            Write-Output "Completion email sent."
         }
-        function s($a) {
-            sleep -m $a
-        }
-        b 660 100;
-        s 150;
-        b 660 100;
-        s 300;
-        b 660 100;
-        s 300;
-        b 510 100;
-        s 100;
-        b 660 100;
-        s 300;
-        b 770 100;
-        s 550;
 
         $wshell = New-Object -ComObject Wscript.Shell
         $wshell.Popup("Provisioning completed", 0, "provPC")
@@ -209,7 +374,7 @@ else {
             Write-Output "Unregistered scheduled task." >> $LogFile
         }
         else {
-            Write-Error "Scheduled task 'pcProv' could not be deleted. Try manually." >> $LogFile
+            Write-Error "Scheduled task 'pcProv' could not be unregistered. Try manually." >> $LogFile
         }
     }
     else {
