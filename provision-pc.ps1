@@ -3,36 +3,35 @@ param($global:RestartRequired = 0,
     $global:MoreUpdates = 0,
     $global:MaxCycles = 10)
 
-$ScriptDir = "$env:ProgramData\pcProv\"
+$ScriptDir = "$env:ProgramData\ProvisionPC"
 
 # Log file location
 $LogFile = "$ScriptDir\log.txt"
-# Create provPC folder in ProgramData
-If (-not (Test-Path -Path ("$env:ProgramData\pcProv\"))) {
-    New-Item -Path $env:ProgramData -Name "pcProv" -ItemType "directory"
+# Create ProvisionPC folder in ProgramData
+If (-not (Test-Path -Path ("$env:ProgramData\ProvisionPC\"))) {
+    New-Item -Path $env:ProgramData -Name "ProvisionPC" -ItemType "directory"
 }
+
 #Log date and time on each run
 Get-Date >> $LogFile
 
 # Copy this script to ProgramData 
 $CurrentScriptPath = $MyInvocation.MyCommand.Definition
-$ScriptPath = "$ScriptDir\pcProv.ps1"
+$ScriptPath = "$ScriptDir\ProvisionPC.ps1"
 If ($CurrentScriptPath -ne $ScriptPath) {
     Copy-Item -Path $CurrentScriptPath -Destination $ScriptPath
     Write-Output "Copied script to $ScriptPath" >> $LogFile
 }
 
-#Log date and time on each run
-Get-Date >> $LogFile
 
 # Stored function to register a scheduled task to continue the script after reboot.
 function Set-ScheduledRebootTask {
-    $TaskAction = New-ScheduledTaskAction -Execute 'C:\Windows\System32\WindowsPowerShellv1.0\powershell.exe' -Argument "-NonInteractive -NoLogo -NoProfile -File $ScriptPath"
+    $TaskAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NonInteractive -NoLogo -NoProfile -File $ScriptPath"
     $TaskTrigger = New-ScheduledTaskTrigger -RandomDelay (New-TimeSpan -Minutes 5) -AtStartup
     $TaskSettings = New-ScheduledTaskSettingsSet -DontStopOnIdleEnd -RestartInterval (New-TimeSpan -Minutes 1) -RestartCount 10 -StartWhenAvailable
-    $TaskSettings.ExecutionTimeLimit = "PT0S"
     $Task = New-ScheduledTask -Action $TaskAction -Trigger $TaskTrigger -Settings $TaskSettings
-    $Task | Register-ScheduledTask -TaskName "provPC" -User "$env:USERDOMAIN\$env:USERNAME" -Password "$AdminPassword"
+    $CurrentUser = Get-CimInstance -ClassName Win32_ComputerSystem | Select-Object -expand UserName
+    $Task | Register-ScheduledTask -TaskName "ProvisionPC" -User $CurrentUser -Password "$LocalAdminPwd"
 
     If ($?) {
         Write-Output "Scheduled task created. Script will continue after reboot."
@@ -43,11 +42,11 @@ function Set-ScheduledRebootTask {
 }
 # If Statement checks registry key to see where to start the script
 # Part 1: If reg key does not exist, start provisioning
-If (-not (Test-Path 'HKLM:\SOFTWARE\pcProv')) {
+If (-not (Test-Path 'HKLM:\SOFTWARE\ProvisionPC')) {
 
     #Create registry key so we can track our progress between reboots
-    New-Item -Path HKLM:\SOFTWARE\pcProv -Force
-    New-ItemProperty -Path HKLM:\SOFTWARE\pcProv -Name "Status" -Value 0 -Force
+    New-Item -Path HKLM:\SOFTWARE\ProvisionPC -Force
+    New-ItemProperty -Path HKLM:\SOFTWARE\ProvisionPC -Name "Status" -Value 0 -Force
     If ($?) {
         Write-Output "Registry key created for script continuity after reboots with value: 0." >> $LogFile
     }
@@ -62,9 +61,9 @@ If (-not (Test-Path 'HKLM:\SOFTWARE\pcProv')) {
     $Credentials = [System.Management.Automation.PSCredential]::new($DomainAdminUser, $DomainAdminPwd)
 
     # Save credentials
-    New-ItemProperty -Path HKLM:\SOFTWARE\pcProv -PropertyType String -Name "DomainAdminUser" -Value $Credentials.GetNetworkCredential().UserName
-    New-ItemProperty -Path HKLM:\SOFTWARE\pcProv -PropertyType String -Name "DomainName" -Value $Credentials.GetNetworkCredential().Domain
-    $Credentials.GetNetworkCredential().SecurePassword | ConvertFrom-SecureString | Out-File C:\ProgramData\pcProv\cred.txt
+    New-ItemProperty -Path HKLM:\SOFTWARE\ProvisionPC -PropertyType String -Name "DomainAdminUser" -Value $Credentials.GetNetworkCredential().UserName
+    New-ItemProperty -Path HKLM:\SOFTWARE\ProvisionPC -PropertyType String -Name "DomainName" -Value $Credentials.GetNetworkCredential().Domain
+    $Credentials.GetNetworkCredential().SecurePassword | ConvertFrom-SecureString | Out-File C:\ProgramData\ProvisionPC\cred.txt
     $DomainName = $Credentials.GetNetworkCredential().Domain
 
     $NewPCName = Read-Host "Enter the new computer name"
@@ -76,16 +75,21 @@ If (-not (Test-Path 'HKLM:\SOFTWARE\pcProv')) {
         $PCSerialNumber = $defaultValue
     }
     Write-Output "pcSerialNumber: $PCSerialNumber" >> $LogFile
-    New-ItemProperty -Path HKLM:\SOFTWARE\pcProv -PropertyType String -Name "PCSerialNumber" -Value $PCSerialNumber
+    New-ItemProperty -Path HKLM:\SOFTWARE\ProvisionPC -PropertyType String -Name "PCSerialNumber" -Value $PCSerialNumber
     $UserToNotify = Read-Host "Enter the email of the user you want to notify when complete"
     Write-Output "userToNotify: $UserToNotify" >> $LogFile
-    New-ItemProperty -Path HKLM:\SOFTWARE\pcProv -PropertyType String -Name "userToNotify" -Value $UserToNotify -Force
+    New-ItemProperty -Path HKLM:\SOFTWARE\ProvisionPC -PropertyType String -Name "userToNotify" -Value $UserToNotify -Force
+    # Open Choco-Scriptify and Save Command for use after Chocolatey is installed
+    Write-Output "Opening Choco-Scriptify..."
+    Start-Process -FilePath "https://tylerjustyn.dev/app/choco-scriptify/"
+    $ChocoCommand = Read-Host "Paste your Choco-Scriptify command here."
+    New-ItemProperty -Path HKLM:\SOFTWARE\ProvisionPC -PropertyType String -Name "ChocoCommand" -Value $ChocoCommand -Force
     # Ask if user needs admin
     $NeedsAdmin = Read-Host "Is this a laptop or does the user need to be local admin? y/n"
     If ($NeedsAdmin -eq "y") {
         $EndUser = Read-Host "What is the username?"
         Write-Output "EndUser: $EndUser" >> $LogFile
-        New-ItemProperty -Path HKLM:\SOFTWARE\pcProv -PropertyType String -Name "EndUser" -Value $EndUser -Force
+        New-ItemProperty -Path HKLM:\SOFTWARE\ProvisionPC -PropertyType String -Name "EndUser" -Value $EndUser -Force
     }
     # Get admin passwords until they match
     Do {
@@ -97,9 +101,9 @@ If (-not (Test-Path 'HKLM:\SOFTWARE\pcProv')) {
     }
     While ($Pwd1_txt -ne $Pwd2_txt)
     # If passwords match, create accounts
-    $AdminPassword = ""
+    $LocalAdminPwd = ""
     If ($Pwd1_txt -eq $Pwd2_txt) {
-        $AdminPassword = $Pwd1_txt
+        $LocalAdminPwd = $Pwd1_txt
         # Set password and enable Administrator account
         Set-LocalUser -Name "Administrator" -Password $Pwd1 -PasswordNeverExpires:$true
         If ($?) {
@@ -156,13 +160,10 @@ If (-not (Test-Path 'HKLM:\SOFTWARE\pcProv')) {
     }
 
     # Increment the registry value to resume where we left off after reboot
-    Set-ItemProperty -Path HKLM:\SOFTWARE\pcProv -Name "Status" -Value 1
+    Set-ItemProperty -Path HKLM:\SOFTWARE\ProvisionPC -Name "Status" -Value 1
     If ($?) {
         Write-Output "Registry key changed to value: 0." >> $LogFile
     }
-
-    ## Rename the computer and restart
-    # Rename-Computer -NewName $NewPCName -Restart -Force
 
     Set-ScheduledRebootTask
 
@@ -171,44 +172,16 @@ If (-not (Test-Path 'HKLM:\SOFTWARE\pcProv')) {
 }
 # Part 2: If script has run, check reg key to determine where to continue
 Else {
-    $regStatus = Get-ItemPropertyValue HKLM:\SOFTWARE\pcProv -Name "Status"
+    $regStatus = Get-ItemPropertyValue HKLM:\SOFTWARE\ProvisionPC -Name "Status"
     # Script Part 2.1
     If ($regStatus -eq 1) {
         Write-Output "Registry key value is: 1. Continuing from Part 2.1" >> $LogFile
 
-        # Retrieve stored credentials
-        $DomainName = (Get-ItemProperty -Path HKLM:\SOFTWARE\pcProv -Name "DomainName").DomainName
-        $DomainAdminUser = (Get-ItemProperty -Path HKLM:\SOFTWARE\pcProv -Name "DomainAdminUser").DomainAdminUser
-        $DomainAdminPwd = (get-content C:\ProgramData\pcProv\cred.txt | ConvertTo-SecureString)
-        # Convert stored credentials to Credential object
-        $Credentials = [System.Management.Automation.PSCredential]::new("$DomainName\$DomainAdminUser", $DomainAdminPwd)
-
-        # Retrieve PCSerialNumber
-        $PCSerialNumber = (Get-ItemProperty -Path HKLM:\SOFTWARE\pcProv -Name "PCSerialNumber").PCSerialNumber
-
-        # Encrypt System Drive
-        Write-Output "Encrypting system drive..." >> $LogFile
-        Start-Process 'manage-bde.exe' -ArgumentList " -protectors -add $env:SystemDrive -recoverypassword" -Verb runas -Wait
-        Start-Process 'manage-bde.exe' -ArgumentList " -on -usedspaceonly $env:SystemDrive -em aes256 " -Verb runas -Wait
-        #Backing Password file to the server
-        New-PSDrive -Name "z" -PSProvider "Filesystem" -Root "\\fileserver\fileshare" -Credential $Credentials
-        If ($?) {
-            New-Item -Path "z:\" -Name "$env:computername $PCSerialNumber" -ItemType "directory"
-            (Get-BitLockerVolume -MountPoint C).KeyProtector > "z:\$env:computername $PCSerialNumber\Bitlocker Recovery Key.txt"
-            If ($?) {
-                Write-Output "Bitlocker key successfully saved." >> $LogFile
-            }
-            Else {
-                Write-Error "Saving Bitlocker key failed. Try manually." >> $LogFile
-            }
-        }
-        Else {
-            Write-Error "Encryption failed, try manually."
-        }
-
+        $ChocoCommand = Get-ItemPropertyValue HKLM:\SOFTWARE\ProvisionPC -Name "ChocoCommand"
+        Invoke-Expression $ChocoCommand
 
         # Increment the registry value to resume where we left off after reboot
-        Set-ItemProperty -Path HKLM:\SOFTWARE\pcProv -Name "Status" -Value 2
+        Set-ItemProperty -Path HKLM:\SOFTWARE\ProvisionPC -Name "Status" -Value 2
         If ($?) {
             Write-Output "Registry key changed to value: 2." >> $LogFile
         }
@@ -222,7 +195,7 @@ Else {
         # Credit to joefitzgerald on Github https://gist.github.com/joefitzgerald/8203265
 
         function Check-ContinueRestartOrEnd() {
-            $RegistryKey = "HKLM:\SOFTWARE\pcProv"
+            $RegistryKey = "HKLM:\SOFTWARE\ProvisionPC"
             $RegistryEntry = "InstallWindowsUpdates"
             switch ($global:RestartRequired) {
                 0 {			
@@ -397,18 +370,18 @@ Else {
             Check-ContinueRestartOrEnd
         }
 
-        Set-ItemProperty -Path HKLM:\SOFTWARE\pcProv -Name "Status" -Value 3
+        Set-ItemProperty -Path HKLM:\SOFTWARE\ProvisionPC -Name "Status" -Value 3
         If ($?) {
             Write-Output "Registry key changed to value: 3." >> $LogFile
         }
         Restart-Computer -Force
 
     }
-    # Script Part 2.3
-    ElseIf ($regStatus -eq 3) {
-        Write-Output "Registry key value is: 3. Continuing from Part 2.3" >> $LogFile
+    elseif ($regStatus -eq 3) {
+        Write-Output "Registry key value is: 3 Continuing from Part 2.3"
+
         # Add laptop user to Administrators
-        $EndUser = Get-ItemPropertyValue HKLM:\SOFTWARE\pcProv -Name "EndUser"
+        $EndUser = Get-ItemPropertyValue HKLM:\SOFTWARE\ProvisionPC -Name "EndUser"
         If ($EndUser.length -gt 0 ) {
             Write-Output "Adding $EndUser to Administrators group."
             Add-LocalGroupMember -Group "Administrators" -Member "$DomainName\$EndUser"
@@ -419,11 +392,46 @@ Else {
         Else {
             Write-Error "Adding $EndUser to Administrators failed. Try manually."
         }
-        Write-Output "Provisioning complete." >> $LogFile
+        
+
+        # Retrieve stored credentials
+        $DomainName = (Get-ItemProperty -Path HKLM:\SOFTWARE\ProvisionPC -Name "DomainName").DomainName
+        $DomainAdminUser = (Get-ItemProperty -Path HKLM:\SOFTWARE\ProvisionPC -Name "DomainAdminUser").DomainAdminUser
+        $DomainAdminPwd = (get-content C:\ProgramData\ProvisionPC\cred.txt | ConvertTo-SecureString)
+        # Convert stored credentials to Credential object
+        $Credentials = [System.Management.Automation.PSCredential]::new("$DomainName\$DomainAdminUser", $DomainAdminPwd)
+
+        # Retrieve PCSerialNumber
+        $PCSerialNumber = (Get-ItemProperty -Path HKLM:\SOFTWARE\ProvisionPC -Name "PCSerialNumber").PCSerialNumber
+
+        # Update Group Policy (For Storing GP in AD if enabled)
+        gpupdate /force
+
+        # Encrypt System Drive
+        Write-Output "Encrypting system drive..." >> $LogFile
+        Start-Process 'manage-bde.exe' -ArgumentList " -protectors -add $env:SystemDrive -recoverypassword" -Verb runas -Wait
+        Start-Process 'manage-bde.exe' -ArgumentList " -on -usedspaceonly $env:SystemDrive -em aes256 " -Verb runas -Wait
+        If ($?) {
+            Write-Output "Bitlocker encryption successful." >> $LogFile
+        }
+        Else {
+            Write-Error "Bitlocker encryption failed. Try manually." >> $Logfile
+        }
+
+        Set-ItemProperty -Path HKLM:\SOFTWARE\ProvisionPC -Name "Status" -Value 4
+        If ($?) {
+            Write-Output "Registry key changed to value: 4." >> $LogFile
+        }
+        Restart-Computer -Force
+    }
+    # Script Part 2.4
+    ElseIf ($regStatus -eq 4) {
+        Write-Output "Registry key value is: 4. Continuing from Part 2.4" >> $LogFile
+        Write-Output "Provisioning complete. Cleaning up..." >> $LogFile
 
         # Email to notify the script is complete
-        $UserToNotify = Get-ItemPropertyValue HKLM:\SOFTWARE\pcProv -Name "userToNotify"
-        Send-MailMessage -From $UserToNotify -To $UserToNotify -Subject "$env:computername Provisioning Complete" -Body "See the attached log for details." -Attachments $LogFile -Priority High -DeliveryNotificationOption OnSuccess, OnFailure -SmtpServer 'mxout-bulk.internetbrands.com'
+        $UserToNotify = Get-ItemPropertyValue HKLM:\SOFTWARE\ProvisionPC -Name "userToNotify"
+        Send-MailMessage -From $UserToNotify -To $UserToNotify -Subject "$env:computername Provisioning Complete" -Body "See the attached log for details." -Attachments $LogFile -Priority High -DeliveryNotificationOption OnSuccess, OnFailure
         If ($?) {
             Write-Output "Completion email sent." >> $LogFile
         }
@@ -431,25 +439,6 @@ Else {
             Write-Error "Completion email could not be sent." >> $LogFile
         }
 
-        # # Popup to notify the script is complete
-        # $wshell = New-Object -ComObject Wscript.Shell
-        # $wshell.Popup("Provisioning completed", 0, "provPC")
-
-        # Cleanup
-        Unregister-ScheduledTask -TaskName "pcProv" -Confirm:$false
-        If ($?) {
-            Write-Output "Unregistered scheduled task." >> $LogFile
-        }
-        Else {
-            Write-Error "Scheduled task 'pcProv' could not be unregistered. Try manually." >> $LogFile
-        }
-        Remove-ItemProperty -Path "HKLM:\SOFTWARE\Microsft\Windows\CurrentVersion\Run" -Name "InstallWindowsUpdates"
-        If ($?) {
-            Write-Output "Removed startup reg entry." >> $LogFile
-        }
-        Else {
-            Write-Error "Startup reg entry could not be removed. Manually delete this entry: HKLM:\SOFTWARE\Microsft\Windows\CurrentVersion\Run\InstallWindowsUpdates" >> $LogFile
-        }
         Remove-Item -Path "$ScriptDir\cred.txt" -Force
         If ($?) {
             Write-Output "Removed stored credential."
@@ -458,9 +447,20 @@ Else {
             Write-Error "Couldn't remove credential. Manually from $ScriptDir\cred.txt"
         }
         # Increment script number
-        Set-ItemProperty -Path HKLM:\SOFTWARE\pcProv -Name "Status" -Value 4
+        Set-ItemProperty -Path HKLM:\SOFTWARE\ProvisionPC -Name "Status" -Value 4
         If ($?) {
             Write-Output "Registry key changed to value: 4." >> $LogFile
+        }
+        Unregister-ScheduledTask -TaskName "ProvisionPC" -Confirm:$false
+        If ($?) {
+            Write-Output "Unregistered scheduled task." >> $LogFile
+        }
+        Else {
+            Write-Error "Scheduled task 'ProvisionPC' could not be unregistered. Try manually." >> $LogFile
+        }
+        Set-ItemProperty -Path HKLM:\SOFTWARE\ProvisionPC -Name "Status" -Value 5
+        If ($?) {
+            Write-Output "Registry key changed to value: 5." >> $LogFile
         }
         # After completion, the script deletes itself
         Remove-Item -LiteralPath ($MyInvocation.MyCommand.Path) -Force
@@ -471,7 +471,7 @@ Else {
             Write-Error "Couldn't delete script. Remove manually from $ScriptDir"
         }
     }
-    ElseIf ($regStatus -eq 4) {
+    ElseIf ($regStatus -eq 5) {
         Write-Output "Script has already completed. Exiting."
     }
     Else {
