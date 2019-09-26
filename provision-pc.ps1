@@ -3,14 +3,27 @@ param($global:RestartRequired = 0,
     $global:MoreUpdates = 0,
     $global:MaxCycles = 10)
 
-# Config variables
-# DEFAULTS
-# $DC =
+### Config variables
+
+### Defaults
+
+## Domain Controller (Required) 
+# $DC = 
+
+## URL to Choco Scriptify Implementation (Required)
 # $ChocoScriptifyURL = "https://tylerjustyn.dev/app/choco-scriptify"
+
+## URL to download Chocolatey (Required) 
 # $ChocolateyURL = "https://chocolatey.org/install.ps1"
+
+## URL of internal Chocolatey Repository (Optional) 
 # $ChocoRepoURL = 
+
+## URL to Save Bitlocker Key (Optional)
+# $PSDriveRoot = 
+
+## URL of mail server for sending completion notification (Optional)
 # $SMTPServer = 
-# END DEFAULTS
 
 $ScriptDir = "$env:ProgramData\ProvisionPC"
 
@@ -438,7 +451,6 @@ Else {
             Write-Error "Bitlocker encryption failed. Try manually." >> $Logfile
         }
         #Backing Password file to the server
-        $PSDriveRoot = \\bigshare\network operations\IT Inventory\BitLocker PWs
         New-PSDrive -Name "z" -PSProvider "Filesystem" -Root $PSDriveRoot -Credential $Credentials
         If ($?) {
             New-Item -Path "z:\" -Name "$env:computername $PCSerialNumber" -ItemType "directory"
