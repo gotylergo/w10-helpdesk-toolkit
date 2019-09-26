@@ -3,6 +3,15 @@ param($global:RestartRequired = 0,
     $global:MoreUpdates = 0,
     $global:MaxCycles = 10)
 
+# Config variables
+# DEFAULTS (UNCOMMENT AND ASSIGN THESE)
+# $DC = 
+# $ChocoScriptifyURL = https://tylerjustyn.dev/app/choco-scriptify
+# $ChocolateyURL = https://chocolatey.org/install.ps1
+# $ChocoRepoURL = 
+# $SMTPServer = 
+# END DEFAULTS
+
 $ScriptDir = "$env:ProgramData\ProvisionPC"
 
 # Log file location
@@ -81,7 +90,7 @@ If (-not (Test-Path 'HKLM:\SOFTWARE\ProvisionPC')) {
     New-ItemProperty -Path HKLM:\SOFTWARE\ProvisionPC -PropertyType String -Name "userToNotify" -Value $UserToNotify -Force
     # Open Choco-Scriptify and Save Command for use after Chocolatey is installed
     Write-Output "Opening Choco-Scriptify..."
-    Start-Process -FilePath "https://tylerjustyn.dev/app/choco-scriptify/"
+    Start-Process -FilePath $ChocoScriptifyURL
     $ChocoCommand = Read-Host "Paste your Choco-Scriptify command here."
     New-ItemProperty -Path HKLM:\SOFTWARE\ProvisionPC -PropertyType String -Name "ChocoCommand" -Value $ChocoCommand -Force
     # Ask if user needs admin
@@ -151,7 +160,7 @@ If (-not (Test-Path 'HKLM:\SOFTWARE\ProvisionPC')) {
     }
 
     # Install Chocolatey
-    iex ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1'))
+    iex ((New-Object System.Net.WebClient).DownloadString($ChocolateyURL))
     If ($?) {
         Write-Output "Chocolatey is installed." >> $LogFile
     }
@@ -168,7 +177,7 @@ If (-not (Test-Path 'HKLM:\SOFTWARE\ProvisionPC')) {
     Set-ScheduledRebootTask
 
     # Join to domain and restart
-    Add-Computer -DomainName $DomainName -NewName $NewPCName -Credential $Credentials -Restart -Force
+    Add-Computer -DomainName $DomainName -Server $DC -NewName $NewPCName -Credential $Credentials -Restart -Force
 }
 # Part 2: If script has run, check reg key to determine where to continue
 Else {
@@ -176,6 +185,17 @@ Else {
     # Script Part 2.1
     If ($regStatus -eq 1) {
         Write-Output "Registry key value is: 1. Continuing from Part 2.1" >> $LogFile
+
+        # Add Choco Repo
+        If ($null -ne $ChocoRepoName) {
+            choco source add -n=$ChocoRepoName -s $ChocoRepoURL --priority="'1'"
+            If ($?) {
+                Write-Output "Choco source added: $ChocoRepoName." >> $LogFile
+            }
+            Else {
+                Write-Error "Choco source add: '$ChocoRepoName' failed." >> $LogFile
+            }
+        }
 
         $ChocoCommand = Get-ItemPropertyValue HKLM:\SOFTWARE\ProvisionPC -Name "ChocoCommand"
         Invoke-Expression $ChocoCommand
@@ -417,6 +437,25 @@ Else {
         Else {
             Write-Error "Bitlocker encryption failed. Try manually." >> $Logfile
         }
+        #Backing Password file to the server
+        $PSDriveRoot = \\bigshare\network operations\IT Inventory\BitLocker PWs
+        New-PSDrive -Name "z" -PSProvider "Filesystem" -Root $PSDriveRoot -Credential $Credentials
+        If ($?) {
+            New-Item -Path "z:\" -Name "$env:computername $PCSerialNumber" -ItemType "directory"
+            $BLV = Get-BitLockerVolume -MountPoint "C:"
+            $KeyProtector = ($BLV.KeyProtector | Where-Object {$_.KeyProtectorType -eq 'RecoveryPassword'})
+            $KeyProtectorID = $KeyProtector.$KeyProtectorID
+            $KeyProtector > "z:\$env:computername $PCSerialNumber\Bitlocker Recovery Key $KeyProtectorID.txt"
+            If ($?) {
+                Write-Output "Bitlocker key successfully saved." >> $LogFile
+            }
+            Else {
+                Write-Error "Saving Bitlocker key failed. Try manually." >> $LogFile
+            }
+        }
+        Else {
+            Write-Error "Encryption failed, try manually."
+        }
 
         Set-ItemProperty -Path HKLM:\SOFTWARE\ProvisionPC -Name "Status" -Value 4
         If ($?) {
@@ -431,12 +470,14 @@ Else {
 
         # Email to notify the script is complete
         $UserToNotify = Get-ItemPropertyValue HKLM:\SOFTWARE\ProvisionPC -Name "userToNotify"
-        Send-MailMessage -From $UserToNotify -To $UserToNotify -Subject "$env:computername Provisioning Complete" -Body "See the attached log for details." -Attachments $LogFile -Priority High -DeliveryNotificationOption OnSuccess, OnFailure
-        If ($?) {
-            Write-Output "Completion email sent." >> $LogFile
-        }
-        Else {
-            Write-Error "Completion email could not be sent." >> $LogFile
+        If ($null -ne $SMTPServer) {
+            Send-MailMessage -From $UserToNotify -To $UserToNotify -Subject "$env:computername Provisioning Complete" -Body "See the attached log for details." -Attachments $LogFile -Priority High -DeliveryNotificationOption OnSuccess, OnFailure -SmtpServer $SMTPServer
+            If ($?) {
+                Write-Output "Completion email sent." >> $LogFile
+            }
+            Else {
+                Write-Error "Completion email could not be sent." >> $LogFile
+            }
         }
 
         Remove-Item -Path "$ScriptDir\cred.txt" -Force
