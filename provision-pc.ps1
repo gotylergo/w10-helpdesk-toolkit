@@ -19,8 +19,8 @@ param($global:RestartRequired = 0,
 ## URL of internal Chocolatey Repository (Optional) 
 # $ChocoRepoURL = 
 
-## URL to Save Bitlocker Key (Optional)
-# $PSDriveRoot = 
+## Path to Fileshare to Save Bitlocker Key (Optional)
+# $BitlockerFSRoot = 
 
 ## URL of mail server for sending completion notification (Optional)
 # $SMTPServer = 
@@ -451,7 +451,7 @@ Else {
             Write-Error "Bitlocker encryption failed. Try manually." >> $Logfile
         }
         #Backing Password file to the server
-        New-PSDrive -Name "z" -PSProvider "Filesystem" -Root $PSDriveRoot -Credential $Credentials
+        New-PSDrive -Name "z" -PSProvider "Filesystem" -Root $BitlockerFSRoot -Credential $Credentials
         If ($?) {
             New-Item -Path "z:\" -Name "$env:computername $PCSerialNumber" -ItemType "directory"
             $BLV = Get-BitLockerVolume -MountPoint "C:"
