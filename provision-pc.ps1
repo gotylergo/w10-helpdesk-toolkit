@@ -124,6 +124,7 @@ If (-not (Test-Path 'HKLM:\SOFTWARE\ProvisionPC')) {
     }
     While ($Pwd1_txt -ne $Pwd2_txt)
     # If passwords match, create accounts
+    $LocalAdminPwd = ""
     If ($Pwd1_txt -eq $Pwd2_txt) {
         $LocalAdminPwd = $Pwd1_txt
         # Set password and enable Administrator account
