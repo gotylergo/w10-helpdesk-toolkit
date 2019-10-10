@@ -105,7 +105,8 @@ If (-not (Test-Path 'HKLM:\SOFTWARE\ProvisionPC')) {
     # Open Choco-Scriptify and Save Command for use after Chocolatey is installed
     Write-Output "Opening Choco-Scriptify..."
     Start-Process -FilePath $ChocoScriptifyURL
-    $ChocoCommand = Read-Host "Paste your Choco-Scriptify command here"
+    $ChocoCommand = Read-Host "Paste your Choco-Scriptify command here (uncheck 'install chocolatey')"
+    $ChocoCommand = $ChocoCommand.Trim()
     New-ItemProperty -Path HKLM:\SOFTWARE\ProvisionPC -PropertyType String -Name "ChocoCommand" -Value $ChocoCommand -Force
     # Ask if user needs admin
     $NeedsAdmin = Read-Host "Is this a laptop or does the user need to be local admin? y/n"
