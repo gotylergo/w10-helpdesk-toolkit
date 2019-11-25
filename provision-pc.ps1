@@ -4,7 +4,7 @@ param($global:RestartRequired = 0,
   $global:MaxCycles = 10)
 
 # Confirm PC is domain joined and named correctly before running script
-Write-Output "Before we start, confirm this workstation is joined to the domain and renamed properly."
+Write-Output "Before we start, confirm: `n 1) this workstation is joined to the domain and renamed properly `n 2) you are running the script from a local admin account (not a domain account)"
 Pause
 
 ### Config variables
