@@ -97,7 +97,7 @@ If (-not (Test-Path 'HKLM:\SOFTWARE\ProvisionPC')) {
 
   # Get variables, store variables that will be needed after reboot in the registry
   # Get credentials
-  $DomainAdminUser = Read-Host "Enter your domain admin username in the form of domain.com\username"
+  $DomainAdminUser = Read-Host "Enter your domain admin username in the form of domain\username"
   $DomainAdminPwd = Read-Host "Enter your domain admin password" -AsSecureString
   $Credentials = [System.Management.Automation.PSCredential]::new($DomainAdminUser, $DomainAdminPwd)
 
