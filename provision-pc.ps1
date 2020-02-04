@@ -96,10 +96,64 @@ If (-not (Test-Path 'HKLM:\SOFTWARE\ProvisionPC')) {
   }
 
   # Get variables, store variables that will be needed after reboot in the registry
-  # Get credentials
-  $DomainAdminUser = Read-Host "Enter your domain admin username in the form of domain\username"
-  $DomainAdminPwd = Read-Host "Enter your domain admin password" -AsSecureString
-  $Credentials = [System.Management.Automation.PSCredential]::new($DomainAdminUser, $DomainAdminPwd)
+  # Get credentials until they are correct
+  Add-Type -AssemblyName System.DirectoryServices.AccountManagement
+  $ValidAccount = $False
+  $Attempt = 1
+  $MaxAttempts = 5
+  $CredentialPrompt = "Getting domain admin credentials (attempt #$Attempt out of $MaxAttempts):"
+
+  Do {
+    # Blank any previous failure messages and then prompt for credentials with the custom message and the pre-populated domain\user name.
+    $FailureMessage = $Null
+    Write-Output $CredentialPrompt
+    $DomainAdminUser = Read-Host "Enter your domain admin username in the form of domain\username"
+    $DomainAdminPwd = Read-Host "Enter your domain admin password" -AsSecureString
+    Add-Type -AssemblyName System.DirectoryServices.AccountManagement
+    $Credentials = [System.Management.Automation.PSCredential]::new($DomainAdminUser, $DomainAdminPwd)
+
+  
+    # Verify the credentials prompt wasn't bypassed.
+    If ($Credentials) {
+      $UserName = $Credentials.UserName
+      # Test the user name (even if it was changed in the credential prompt) and password.
+      $ContextType = [System.DirectoryServices.AccountManagement.ContextType]::Domain
+      Try {
+        $PrincipalContext = New-Object System.DirectoryServices.AccountManagement.PrincipalContext $ContextType, $UserDomain
+      }
+      Catch {
+        If ($_.Exception.InnerException -like "*The server could not be contacted*") {
+          $FailureMessage = "Could not contact a server for the specified domain on attempt #$Attempt out of $MaxAttempts."
+        }
+        Else {
+          $FailureMessage = "Unpredicted failure: `"$($_.Exception.Message)`" on attempt #$Attempt out of $MaxAttempts."
+        }
+      }
+      # If there wasn't a failure talking to the domain test the validation of the credentials, and if it fails record a failure message.
+      If (-not($FailureMessage)) {
+        $ValidAccount = $PrincipalContext.ValidateCredentials($UserName, $Credentials.GetNetworkCredential().Password)
+        If (-not($ValidAccount)) {
+          $FailureMessage = "Bad user name or password used on credential prompt attempt #$Attempt out of $MaxAttempts."
+        }
+      }
+      # Otherwise the credential prompt was (most likely accidentally) bypassed so record a failure message.
+    }
+    Else {
+      $FailureMessage = "Credential prompt closed/skipped on attempt #$Attempt out of $MaxAttempts."
+    }
+ 
+    # If there was a failure message recorded above, display it, and update credential prompt message.
+    If ($FailureMessage) {
+      Write-Warning "$FailureMessage"
+      $Attempt++
+      If ($Attempt -lt $MaxAttempts) {
+        $CredentialPrompt = "Authentication error. Please try again (attempt #$Attempt out of $MaxAttempts):"
+      }
+      ElseIf ($Attempt -eq $MaxAttempts) {
+        $CredentialPrompt = "Authentication error. THIS IS YOUR LAST CHANCE (attempt #$Attempt out of $MaxAttempts):"
+      }
+    }
+  } Until (($ValidAccount) -or ($Attempt -gt $MaxAttempts))
 
   # Save credentials
   New-ItemProperty -Path HKLM:\SOFTWARE\ProvisionPC -PropertyType String -Name "DomainAdminUser" -Value $Credentials.GetNetworkCredential().UserName
